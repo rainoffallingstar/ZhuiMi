@@ -228,11 +228,14 @@ func scoreArticles(ctx context.Context, cfg config.Config, db *store.Store, arti
 	}
 	client := scoring.NewClient(cfg)
 	jobs := make(chan model.Article)
-	errs := make(chan error, len(articles))
+	results := make(chan scoreResult, len(articles))
 	workers := cfg.ScoreConcurrency
 	if workers > len(articles) {
 		workers = len(articles)
 	}
+	progress := newScoreProgress(len(articles), workers)
+	progress.Start()
+
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -241,15 +244,18 @@ func scoreArticles(ctx context.Context, cfg config.Config, db *store.Store, arti
 			for article := range jobs {
 				score, err := client.ScoreArticle(ctx, article)
 				if err != nil {
-					_ = db.MarkScoreFailed(article.ID, err.Error(), time.Now().UTC())
-					errs <- nil
+					if markErr := db.MarkScoreFailed(article.ID, err.Error(), time.Now().UTC()); markErr != nil {
+						results <- scoreResult{Article: article, FatalErr: markErr}
+						continue
+					}
+					results <- scoreResult{Article: article, ScoreErr: err}
 					continue
 				}
 				if err := db.SaveScore(article.ID, score); err != nil {
-					errs <- err
+					results <- scoreResult{Article: article, FatalErr: err}
 					continue
 				}
-				errs <- nil
+				results <- scoreResult{Article: article}
 			}
 		}()
 	}
@@ -260,15 +266,18 @@ func scoreArticles(ctx context.Context, cfg config.Config, db *store.Store, arti
 		}
 		close(jobs)
 		wg.Wait()
-		close(errs)
+		close(results)
 	}()
 
-	for err := range errs {
-		if err != nil {
-			return err
+	var fatalErr error
+	for result := range results {
+		progress.Advance(result)
+		if result.FatalErr != nil && fatalErr == nil {
+			fatalErr = result.FatalErr
 		}
 	}
-	return nil
+	progress.Done()
+	return fatalErr
 }
 
 func shouldInclude(article *model.Article) bool {

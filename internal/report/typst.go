@@ -119,7 +119,11 @@ func CompilePDF(inputPath, outputPath string) error {
 	if err != nil {
 		return fmt.Errorf("typst not found in PATH: %w", err)
 	}
-	output, err := runCommandFunc(typstBin, "compile", inputPath, outputPath)
+	rootPath, err := detectTypstRoot(inputPath)
+	if err != nil {
+		return err
+	}
+	output, err := runCommandFunc(typstBin, "compile", "--root", rootPath, inputPath, outputPath)
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		if message != "" {
@@ -128,6 +132,28 @@ func CompilePDF(inputPath, outputPath string) error {
 		return fmt.Errorf("typst compile failed: %w", err)
 	}
 	return nil
+}
+
+func detectTypstRoot(inputPath string) (string, error) {
+	absInputPath, err := filepath.Abs(inputPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute input path: %w", err)
+	}
+
+	inputDir := filepath.Dir(absInputPath)
+	dir := inputDir
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "config.typ")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return inputDir, nil
 }
 
 func WriteIndex(cfg config.Config, dates []string) error {

@@ -54,6 +54,12 @@ func TestCompileDailyPDFUsesTypstCommand(t *testing.T) {
 	}()
 
 	cfg := config.Config{ContentDir: t.TempDir()}
+	if err := os.WriteFile(filepath.Join(cfg.ContentDir, "config.typ"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cfg.ContentDir, "2026-03-09"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	var gotBin string
 	var gotArgs []string
 	lookPathFunc = func(file string) (string, error) {
@@ -74,7 +80,7 @@ func TestCompileDailyPDFUsesTypstCommand(t *testing.T) {
 	if gotBin != "/usr/local/bin/typst" {
 		t.Fatalf("unexpected typst binary: %s", gotBin)
 	}
-	if len(gotArgs) != 3 || gotArgs[0] != "compile" || !strings.HasSuffix(gotArgs[1], filepath.Join("2026-03-09", "index.typ")) || !strings.HasSuffix(gotArgs[2], filepath.Join("2026-03-09", "index.pdf")) {
+	if len(gotArgs) != 5 || gotArgs[0] != "compile" || gotArgs[1] != "--root" || gotArgs[2] != cfg.ContentDir || !strings.HasSuffix(gotArgs[3], filepath.Join("2026-03-09", "index.typ")) || !strings.HasSuffix(gotArgs[4], filepath.Join("2026-03-09", "index.pdf")) {
 		t.Fatalf("unexpected typst args: %+v", gotArgs)
 	}
 }
