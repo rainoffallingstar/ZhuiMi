@@ -153,7 +153,27 @@ func detectTypstRoot(inputPath string) (string, error) {
 		dir = parent
 	}
 
+	if repoRoot := detectRepoRoot(inputDir); repoRoot != "" {
+		return repoRoot, nil
+	}
+
 	return inputDir, nil
+}
+
+func detectRepoRoot(dir string) string {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 func WriteIndex(cfg config.Config, dates []string) error {

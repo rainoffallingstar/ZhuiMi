@@ -84,3 +84,26 @@ func TestCompileDailyPDFUsesTypstCommand(t *testing.T) {
 		t.Fatalf("unexpected typst args: %+v", gotArgs)
 	}
 }
+
+func TestDetectTypstRootFallsBackToRepoRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module demo\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inputDir := filepath.Join(repoRoot, "content", "ZhuiMi", "2026-03-09")
+	if err := os.MkdirAll(inputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(inputDir, "index.typ")
+	if err := os.WriteFile(inputPath, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := detectTypstRoot(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != repoRoot {
+		t.Fatalf("expected repo root %s, got %s", repoRoot, root)
+	}
+}

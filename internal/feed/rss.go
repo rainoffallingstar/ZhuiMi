@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +44,8 @@ type FetchResult struct {
 	Err         error
 	NotModified bool
 }
+
+var htmlTagPattern = regexp.MustCompile(`<[^>]+>`)
 
 func FetchFeeds(ctx context.Context, cfg config.Config, feeds []model.Feed) []FetchResult {
 	jobs := make(chan model.Feed)
@@ -126,11 +130,16 @@ func fetchFeed(ctx context.Context, client *http.Client, feed model.Feed) FetchR
 
 	items := make([]RSSItem, 0, len(doc.Channel.Items))
 	for _, item := range doc.Channel.Items {
+		title := strings.TrimSpace(item.Title)
+		description := strings.TrimSpace(item.Description)
+		if shouldSkipTitleOnlyItem(title, description) {
+			continue
+		}
 		publishedAt := parseDate(item.PubDate)
 		items = append(items, RSSItem{
-			Title:       strings.TrimSpace(item.Title),
+			Title:       title,
 			Link:        strings.TrimSpace(item.Link),
-			Description: strings.TrimSpace(item.Description),
+			Description: description,
 			PubDate:     publishedAt,
 			DOI:         model.ExtractDOI(item.Link, item.Description, item.GUID),
 			FeedURL:     feed.URL,
@@ -153,4 +162,23 @@ func parseDate(raw string) *time.Time {
 		}
 	}
 	return nil
+}
+
+func shouldSkipTitleOnlyItem(title, description string) bool {
+	normalizedTitle := normalizeContentForFilter(title)
+	normalizedDescription := normalizeContentForFilter(description)
+	if normalizedDescription == "" {
+		return true
+	}
+	return normalizedTitle != "" && normalizedDescription == normalizedTitle
+}
+
+func normalizeContentForFilter(value string) string {
+	value = html.UnescapeString(value)
+	value = htmlTagPattern.ReplaceAllString(value, "")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
