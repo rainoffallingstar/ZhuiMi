@@ -29,6 +29,7 @@ type Config struct {
 	OpenAITemperature float64
 	FetchConcurrency  int
 	ScoreConcurrency  int
+	ScoreRateLimit    int
 }
 
 func Load(repoRoot string) (Config, error) {
@@ -55,6 +56,7 @@ func Load(repoRoot string) (Config, error) {
 		OpenAITemperature: 0.3,
 		FetchConcurrency:  6,
 		ScoreConcurrency:  3,
+		ScoreRateLimit:    1,
 	}
 
 	if err := applyLegacyYAML(&cfg); err != nil {
@@ -77,6 +79,9 @@ func Load(repoRoot string) (Config, error) {
 	if cfg.ScoreConcurrency < 1 {
 		cfg.ScoreConcurrency = 1
 	}
+	if cfg.ScoreRateLimit < 1 {
+		cfg.ScoreRateLimit = 1
+	}
 
 	return cfg, nil
 }
@@ -96,6 +101,9 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("ZHUIMI_SCORE_CONCURRENCY"); value != "" {
 		cfg.ScoreConcurrency = parseInt(value, cfg.ScoreConcurrency)
+	}
+	if value := os.Getenv("ZHUIMI_SCORE_RATE_LIMIT"); value != "" {
+		cfg.ScoreRateLimit = parseInt(value, cfg.ScoreRateLimit)
 	}
 	if value := os.Getenv("ZHUIMI_STATE_PATH"); value != "" {
 		cfg.StatePath = resolvePath(cfg.RepoRoot, value)
@@ -153,6 +161,8 @@ func applyLegacyYAML(cfg *Config) error {
 			cfg.OpenAITemperature = parseFloat(value, cfg.OpenAITemperature)
 		case "ai.timeout_seconds":
 			cfg.OpenAITimeout = time.Duration(parseInt(value, int(cfg.OpenAITimeout/time.Second))) * time.Second
+		case "ai.score_rate_limit", "ai.rate_limit":
+			cfg.ScoreRateLimit = parseInt(value, cfg.ScoreRateLimit)
 		case "report.sort_by":
 			cfg.SortBy = value
 		case "report.max_articles":

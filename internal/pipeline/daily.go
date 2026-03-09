@@ -227,6 +227,8 @@ func scoreArticles(ctx context.Context, cfg config.Config, db *store.Store, arti
 		return nil
 	}
 	client := scoring.NewClient(cfg)
+	waitToken, stopLimiter := newScoreRateLimiter(cfg.ScoreRateLimit)
+	defer stopLimiter()
 	jobs := make(chan model.Article)
 	results := make(chan scoreResult, len(articles))
 	workers := cfg.ScoreConcurrency
@@ -242,6 +244,10 @@ func scoreArticles(ctx context.Context, cfg config.Config, db *store.Store, arti
 		go func() {
 			defer wg.Done()
 			for article := range jobs {
+				if err := waitToken(ctx); err != nil {
+					results <- scoreResult{Article: article, FatalErr: err}
+					return
+				}
 				score, err := client.ScoreArticle(ctx, article)
 				if err != nil {
 					if markErr := db.MarkScoreFailed(article.ID, err.Error(), time.Now().UTC()); markErr != nil {
@@ -278,6 +284,48 @@ func scoreArticles(ctx context.Context, cfg config.Config, db *store.Store, arti
 	}
 	progress.Done()
 	return fatalErr
+}
+
+func newScoreRateLimiter(limit int) (func(context.Context) error, func()) {
+	if limit < 1 {
+		limit = 1
+	}
+	interval := time.Second / time.Duration(limit)
+	if interval <= 0 {
+		interval = time.Nanosecond
+	}
+	tokens := make(chan struct{}, 1)
+	tokens <- struct{}{}
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				select {
+				case tokens <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+
+	wait := func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tokens:
+			return nil
+		}
+	}
+	stop := func() {
+		close(done)
+		ticker.Stop()
+	}
+	return wait, stop
 }
 
 func shouldInclude(article *model.Article) bool {

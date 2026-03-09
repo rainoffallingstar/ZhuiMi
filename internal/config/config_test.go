@@ -20,6 +20,7 @@ ai:
   max_tokens: 1234
   temperature: 0.7
   timeout_seconds: 42
+  score_rate_limit: 7
 report:
   sort_by: "blood"
   max_articles: 88
@@ -36,7 +37,18 @@ output:
 		t.Fatal(err)
 	}
 
-	if cfg.DaysWindow != 5 || cfg.MaxFeeds != 12 || cfg.OpenAIModel != "demo-model" || cfg.SortBy != "blood" || cfg.MaxArticles != 88 {
+	if cfg.DaysWindow != 5 || cfg.MaxFeeds != 12 || cfg.OpenAIModel != "demo-model" || cfg.SortBy != "blood" || cfg.MaxArticles != 88 || cfg.ScoreRateLimit != 7 {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadUsesEnvForScoreRateLimit(t *testing.T) {
+	t.Setenv("ZHUIMI_SCORE_RATE_LIMIT", "9")
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ScoreRateLimit != 9 {
+		t.Fatalf("expected score rate limit 9, got %d", cfg.ScoreRateLimit)
 	}
 }

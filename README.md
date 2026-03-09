@@ -30,6 +30,7 @@ ZhuiMi 主要完成以下工作：
 export OPENAI_BASE_URL=https://api.openai.com
 export OPENAI_API_KEY=your-api-key
 export OPENAI_MODEL=gpt-4o-mini
+export ZHUIMI_SCORE_RATE_LIMIT=1
 ```
 
 然后执行最基本流程：
@@ -199,6 +200,7 @@ go run ./cmd/zhuimi migrate legacy
 - `OPENAI_BASE_URL`
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
+- `ZHUIMI_SCORE_RATE_LIMIT`（可选，默认 `1`，表示每秒评分请求数）
 
 当前计划任务时间：每天 UTC 22:00，即北京时间次日 06:00。
 

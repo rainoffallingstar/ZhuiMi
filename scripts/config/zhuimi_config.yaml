@@ -11,6 +11,7 @@ ai:
   max_tokens: 150000
   temperature: 1
   timeout_seconds: 120
+  score_rate_limit: 1 # 模型评分速率限制（每秒请求数）
 
 # 评分维度说明
 dimensions:
