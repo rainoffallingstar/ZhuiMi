@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .env
+data/zhuimi/*.db
+data/zhuimi/*.db-shm
+data/zhuimi/*.db-wal
+!data/zhuimi/store.db
