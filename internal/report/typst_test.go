@@ -37,6 +37,12 @@ func TestWriteDailyWithOptionsRaw(t *testing.T) {
 	if !strings.Contains(body, "Demo raw article") {
 		t.Fatalf("expected article title in report, got %s", body)
 	}
+	if strings.Contains(body, "**") {
+		t.Fatalf("did not expect markdown-style bold, got %s", body)
+	}
+	if strings.Contains(body, "#N/A") {
+		t.Fatalf("did not expect typst code interpolation for N/A, got %s", body)
+	}
 	if strings.Contains(body, "研究分数") {
 		t.Fatalf("did not expect score labels in raw report, got %s", body)
 	}

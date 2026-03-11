@@ -76,12 +76,12 @@ func WriteDailyWithOptions(cfg config.Config, date string, articles []model.Arti
 			}
 			builder.WriteString(fmt.Sprintf(`== #%d. %s
 
-- **研究本身价值**: #%d / 60
-- **AML借鉴价值**: #%d / 30
-- **表达与可复用性**: #%d / 10
-- **最终总分**: #%d / 100
-- **发布日期**: #%s
-- **DOI**: #%s
+- *研究本身价值*: %d / 60
+- *AML借鉴价值*: %d / 30
+- *表达与可复用性*: %d / 10
+- *最终总分*: %d / 100
+- *发布日期*: %s
+- *DOI*: %s
 %s
 
 审稿结论: %s
@@ -95,9 +95,9 @@ func WriteDailyWithOptions(cfg config.Config, date string, articles []model.Arti
 		}
 		builder.WriteString(fmt.Sprintf(`== #%d. %s
 
-- **发布日期**: #%s
-- **DOI**: #%s
-- **Feed**: #%s
+- *发布日期*: %s
+- *DOI*: %s
+- *Feed*: %s
 %s
 
 摘要: %s
@@ -213,18 +213,18 @@ func renderHeader(date string, count int, mode string) string {
 
 = %s
 
-生成时间: #%s
+生成时间: %s
 
-%s: #%d
+%s: %d
 
 `, title, title, time.Now().Format("2006-01-02 15:04"), description, count)
 }
 
 func renderLinkLine(link string) string {
 	if strings.TrimSpace(link) == "" {
-		return "- **链接**: N/A"
+		return "- *链接*: N/A"
 	}
-	return fmt.Sprintf(`- **链接**: #link("%s")[查看原文]`, link)
+	return fmt.Sprintf(`- *链接*: #link("%s")[查看原文]`, link)
 }
 
 func defaultPublishedDate(value *time.Time) string {
