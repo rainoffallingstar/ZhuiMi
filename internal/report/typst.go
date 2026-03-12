@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"zhuimi/internal/config"
 	"zhuimi/internal/model"
@@ -251,6 +252,8 @@ func scoreValue(article model.Article, key string) int {
 }
 
 func escape(value string) string {
+	// Prevent invalid UTF-8 from leaking into generated Typst files.
+	value = strings.ToValidUTF8(value, "\uFFFD")
 	value = strings.ReplaceAll(value, "$3^{\\prime}$", "3'")
 	value = strings.ReplaceAll(value, "$5^{\\prime}$", "5'")
 	value = strings.ReplaceAll(value, "$\\alpha$", "alpha")
@@ -271,8 +274,20 @@ func defaultValue(value, fallback string) string {
 }
 
 func truncate(value string, limit int) string {
+	// Truncate by bytes, but never cut a UTF-8 sequence in half.
+	value = strings.ToValidUTF8(value, "\uFFFD")
 	if len(value) <= limit {
 		return value
 	}
-	return value[:limit]
+	end := limit
+	if end > len(value) {
+		end = len(value)
+	}
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	if end == 0 {
+		return ""
+	}
+	return value[:end]
 }

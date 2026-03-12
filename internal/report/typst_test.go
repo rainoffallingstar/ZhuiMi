@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"zhuimi/internal/config"
 	"zhuimi/internal/model"
@@ -111,5 +112,14 @@ func TestDetectTypstRootFallsBackToRepoRoot(t *testing.T) {
 	}
 	if root != repoRoot {
 		t.Fatalf("expected repo root %s, got %s", repoRoot, root)
+	}
+}
+
+func TestTruncateKeepsValidUTF8(t *testing.T) {
+	// 3-byte rune; truncating by bytes can easily cut it in half.
+	value := "你好你好你好"
+	out := truncate(value, 5)
+	if !utf8.ValidString(out) {
+		t.Fatalf("expected valid utf-8, got %q", out)
 	}
 }
