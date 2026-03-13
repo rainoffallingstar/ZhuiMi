@@ -3,6 +3,8 @@ package model
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"html"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -83,9 +85,30 @@ type Run struct {
 
 func ExtractDOI(values ...string) string {
 	for _, value := range values {
-		match := doiPattern.FindString(value)
-		if match != "" {
-			return strings.TrimRight(match, ".,;)")
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+
+		candidates := []string{value}
+		if decoded := html.UnescapeString(value); decoded != value {
+			candidates = append(candidates, decoded)
+		}
+		if decoded, err := url.PathUnescape(value); err == nil && decoded != value {
+			candidates = append(candidates, decoded)
+		}
+		// Common in HTML: DOI has "/" encoded, then URL-escaped.
+		if decoded := html.UnescapeString(value); decoded != value {
+			if decoded2, err := url.PathUnescape(decoded); err == nil && decoded2 != decoded {
+				candidates = append(candidates, decoded2)
+			}
+		}
+
+		for _, candidate := range candidates {
+			match := doiPattern.FindString(candidate)
+			if match != "" {
+				return strings.TrimRight(match, ".,;)")
+			}
 		}
 	}
 	return ""

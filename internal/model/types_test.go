@@ -15,3 +15,12 @@ func TestCanonicalizeLink(t *testing.T) {
 		t.Fatalf("unexpected canonical link: %s", got)
 	}
 }
+
+func TestExtractDOIHandlesEscapes(t *testing.T) {
+	if got := ExtractDOI("https://doi.org/10.1000%2Fabc"); got != "10.1000/abc" {
+		t.Fatalf("unexpected doi: %s", got)
+	}
+	if got := ExtractDOI("doi: 10.2000&#x2F;def."); got != "10.2000/def" {
+		t.Fatalf("unexpected doi: %s", got)
+	}
+}

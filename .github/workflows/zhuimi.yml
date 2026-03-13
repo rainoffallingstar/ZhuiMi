@@ -25,6 +25,11 @@ jobs:
       - name: Set up Typst
         uses: typst-community/setup-typst@v4
 
+      - name: Install CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+
       - name: Verify Go build
         run: go test ./...
 

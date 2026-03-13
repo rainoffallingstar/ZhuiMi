@@ -11,6 +11,13 @@
   )
   set text(
     lang: "zh",
+    font: (
+      "Noto Serif CJK SC",
+      "Noto Sans CJK SC",
+      "Noto Serif CJK",
+      "Noto Sans CJK",
+      "DejaVu Sans",
+    ),
     size: 10.5pt,
   )
   body

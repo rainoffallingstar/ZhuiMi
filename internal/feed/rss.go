@@ -141,7 +141,7 @@ func fetchFeed(ctx context.Context, client *http.Client, feed model.Feed) FetchR
 			Link:        strings.TrimSpace(item.Link),
 			Description: description,
 			PubDate:     publishedAt,
-			DOI:         model.ExtractDOI(item.Link, item.Description, item.GUID),
+			DOI:         model.ExtractDOI(item.Title, item.Link, item.Description, item.GUID),
 			FeedURL:     feed.URL,
 		})
 	}
