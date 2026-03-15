@@ -12,6 +12,8 @@ permissions:
 jobs:
   update-literature:
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
 
     steps:
       - name: Checkout repository
@@ -39,12 +41,36 @@ jobs:
         run: go run ./cmd/zhuimi feeds import
 
       - name: Run daily literature update
+        id: daily
         env:
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
           ZHUIMI_STATE_PATH: data/zhuimi/store.db
-        run: go run ./cmd/zhuimi run daily --pdf
+        run: |
+          set -euo pipefail
+          out="$(go run ./cmd/zhuimi run daily --pdf)"
+          echo "$out"
+          report_date="$(printf '%s\n' "$out" | python3 - <<'PY'
+          import json, sys
+          lines = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+          for line in reversed(lines):
+            if not line.startswith("{"):
+              continue
+            try:
+              obj = json.loads(line)
+            except Exception:
+              continue
+            if isinstance(obj, dict) and "report_date" in obj:
+              print(obj["report_date"])
+              raise SystemExit(0)
+          raise SystemExit("report_date not found in run output")
+          PY
+          )"
+          pdf_path="content/ZhuiMi/${report_date}/index.pdf"
+          test -f "$pdf_path"
+          echo "report_date=$report_date" >> "$GITHUB_OUTPUT"
+          echo "pdf_path=$pdf_path" >> "$GITHUB_OUTPUT"
 
       - name: Finalize SQLite store for commit
         env:
@@ -64,8 +90,8 @@ jobs:
       - name: Upload generated PDF artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zhuimi-report-pdfs
-          path: content/ZhuiMi/**/*.pdf
+          name: zhuimi-report-${{ steps.daily.outputs.report_date }}
+          path: ${{ steps.daily.outputs.pdf_path }}
           if-no-files-found: warn
 
       - name: Commit reports and state
@@ -75,3 +101,24 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git commit -m "docs: update ZhuiMi daily report and state"
           git push
+
+      - name: Publish daily PDF to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.daily.outputs.report_date }}"
+          pdf="${{ steps.daily.outputs.pdf_path }}"
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "gh CLI not found on runner"
+            exit 1
+          fi
+          if [ ! -f "$pdf" ]; then
+            echo "missing pdf: $pdf"
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$pdf" --clobber
+          else
+            gh release create "$tag" "$pdf" -t "ZhuiMi $tag" -n "ZhuiMi daily PDF report for $tag."
+          fi
