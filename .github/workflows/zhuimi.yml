@@ -49,24 +49,8 @@ jobs:
           ZHUIMI_STATE_PATH: data/zhuimi/store.db
         run: |
           set -euo pipefail
-          out="$(go run ./cmd/zhuimi run daily --pdf)"
-          echo "$out"
-          report_date="$(printf '%s\n' "$out" | python3 - <<'PY'
-          import json, sys
-          lines = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
-          for line in reversed(lines):
-            if not line.startswith("{"):
-              continue
-            try:
-              obj = json.loads(line)
-            except Exception:
-              continue
-            if isinstance(obj, dict) and "report_date" in obj:
-              print(obj["report_date"])
-              raise SystemExit(0)
-          raise SystemExit("report_date not found in run output")
-          PY
-          )"
+          report_date="$(date +%F)"
+          go run ./cmd/zhuimi run daily --pdf
           pdf_path="content/ZhuiMi/${report_date}/index.pdf"
           test -f "$pdf_path"
           echo "report_date=$report_date" >> "$GITHUB_OUTPUT"
