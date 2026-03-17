@@ -22,6 +22,7 @@ func savePublishedDateReport(cfg config.Config, db *store.Store, date, mode stri
 	}
 
 	filtered, orderedIDs := prepareReportArticles(articles, mode, cfg.SortBy)
+	filtered, orderedIDs = filterArticlesForPDF(filtered, mode, compilePDF)
 	if len(filtered) == 0 {
 		return nil
 	}

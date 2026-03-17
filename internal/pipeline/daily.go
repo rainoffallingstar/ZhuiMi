@@ -146,6 +146,7 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 	}
 	articles := db.ArticlesByIDs(orderedIDs)
 	filtered, orderedIDs := prepareReportArticles(articles, reportMode, cfg.SortBy)
+	filtered, orderedIDs = filterArticlesForPDF(filtered, reportMode, opts.CompilePDF)
 	if len(filtered) == 0 {
 		run.Status = "ok"
 		run.FinishedAt = time.Now().UTC()

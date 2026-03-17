@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"zhuimi/internal/config"
+	"zhuimi/internal/model"
 	"zhuimi/internal/report"
 	"zhuimi/internal/store"
 )
@@ -33,6 +34,12 @@ func RebuildReports(cfg config.Config, db *store.Store, date string, compilePDF 
 				return fmt.Errorf("report has no article snapshots: %s", reportDate)
 			}
 			continue
+		}
+		if compilePDF && normalizeReportMode(stored.Mode) == model.ReportModeScored {
+			articles, _ = filterArticlesForPDF(articles, stored.Mode, true)
+			if len(articles) == 0 {
+				continue
+			}
 		}
 		if err := report.WriteDailyWithOptions(cfg, reportDate, articles, report.WriteOptions{Mode: stored.Mode}); err != nil {
 			return fmt.Errorf("rebuild report %s: %w", reportDate, err)
