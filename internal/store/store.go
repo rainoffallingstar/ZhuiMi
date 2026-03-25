@@ -14,7 +14,7 @@ import (
 	"zhuimi/internal/model"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 6
 
 type migration struct {
 	version int
@@ -27,11 +27,17 @@ type Store struct {
 }
 
 type Stats struct {
-	Feeds          int
-	Articles       int
-	ScoredArticles int
-	Reports        int
-	Runs           int
+	Feeds                 int                       `json:"feeds"`
+	Articles              int                       `json:"articles"`
+	ScoredArticles        int                       `json:"scored_articles"`
+	ContentFetched        int                       `json:"content_fetched"`
+	ContentFallbacks      int                       `json:"content_fallbacks"`
+	ContentMissing        int                       `json:"content_missing"`
+	ContentByStatus       map[string]int            `json:"content_by_status,omitempty"`
+	AIResults             int                       `json:"ai_results"`
+	ProcessorLatestStatus map[string]map[string]int `json:"processor_latest_status,omitempty"`
+	Reports               int                       `json:"reports"`
+	Runs                  int                       `json:"runs"`
 }
 
 type ListArticlesOptions struct {
@@ -159,6 +165,50 @@ func schemaMigrations() []migration {
 				`ALTER TABLE reports ADD COLUMN mode TEXT NOT NULL DEFAULT 'scored';`,
 			},
 		},
+		{
+			version: 4,
+			stmts: []string{
+				`ALTER TABLE feeds ADD COLUMN allow_title_only INTEGER;`,
+			},
+		},
+		{
+			version: 5,
+			stmts: []string{
+				`CREATE TABLE IF NOT EXISTS article_contents (
+					article_id TEXT PRIMARY KEY,
+					resolved_url TEXT,
+					fetch_status TEXT NOT NULL,
+					source_type TEXT,
+					content_text TEXT,
+					content_html TEXT,
+					content_hash TEXT,
+					fetched_at TEXT,
+					error_message TEXT,
+					FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
+				);`,
+				`CREATE TABLE IF NOT EXISTS ai_results (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					article_id TEXT NOT NULL,
+					processor TEXT NOT NULL,
+					model TEXT,
+					input_hash TEXT NOT NULL,
+					status TEXT NOT NULL,
+					output_json TEXT,
+					raw_response TEXT,
+					processed_at TEXT NOT NULL,
+					error_message TEXT,
+					FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
+				);`,
+				`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_results_article_processor_hash ON ai_results(article_id, processor, input_hash);`,
+				`CREATE INDEX IF NOT EXISTS idx_ai_results_processor_status_processed_at ON ai_results(processor, status, processed_at DESC);`,
+			},
+		},
+		{
+			version: 6,
+			stmts: []string{
+				`CREATE INDEX IF NOT EXISTS idx_article_contents_fetch_status_fetched_at ON article_contents(fetch_status, fetched_at DESC);`,
+			},
+		},
 	}
 }
 
@@ -269,10 +319,11 @@ func (s *Store) SetArticleStatus(articleID, status, rawSource string) error {
 
 func (s *Store) UpsertFeed(feed model.Feed) error {
 	_, err := s.db.Exec(`
-		INSERT INTO feeds (url, title, source_file, etag, last_modified, checked_at, success_at, status, last_error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO feeds (url, title, allow_title_only, source_file, etag, last_modified, checked_at, success_at, status, last_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			title = excluded.title,
+			allow_title_only = excluded.allow_title_only,
 			source_file = excluded.source_file,
 			etag = excluded.etag,
 			last_modified = excluded.last_modified,
@@ -283,6 +334,7 @@ func (s *Store) UpsertFeed(feed model.Feed) error {
 	`,
 		feed.URL,
 		feed.Title,
+		nullBoolPtr(feed.AllowTitleOnly),
 		nullIfEmpty(feed.SourceFile),
 		nullIfEmpty(feed.ETag),
 		nullIfEmpty(feed.LastMod),
@@ -305,10 +357,11 @@ func (s *Store) UpsertFeeds(feeds []model.Feed) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO feeds (url, title, source_file, etag, last_modified, checked_at, success_at, status, last_error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO feeds (url, title, allow_title_only, source_file, etag, last_modified, checked_at, success_at, status, last_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			title = excluded.title,
+			allow_title_only = excluded.allow_title_only,
 			source_file = excluded.source_file,
 			etag = excluded.etag,
 			last_modified = excluded.last_modified,
@@ -326,6 +379,7 @@ func (s *Store) UpsertFeeds(feeds []model.Feed) error {
 		if _, err := stmt.Exec(
 			feed.URL,
 			feed.Title,
+			nullBoolPtr(feed.AllowTitleOnly),
 			nullIfEmpty(feed.SourceFile),
 			nullIfEmpty(feed.ETag),
 			nullIfEmpty(feed.LastMod),
@@ -345,7 +399,7 @@ func (s *Store) UpsertFeeds(feeds []model.Feed) error {
 }
 
 func (s *Store) ListFeeds() []model.Feed {
-	rows, err := s.db.Query(`SELECT url, title, source_file, etag, last_modified, checked_at, success_at, status, last_error FROM feeds ORDER BY url`)
+	rows, err := s.db.Query(`SELECT url, title, allow_title_only, source_file, etag, last_modified, checked_at, success_at, status, last_error FROM feeds ORDER BY url`)
 	if err != nil {
 		return nil
 	}
@@ -354,10 +408,12 @@ func (s *Store) ListFeeds() []model.Feed {
 	feeds := make([]model.Feed, 0)
 	for rows.Next() {
 		var feed model.Feed
+		var allowTitleOnly sql.NullBool
 		var sourceFile, etag, lastMod, checkedAt, successAt, status, lastError sql.NullString
-		if err := rows.Scan(&feed.URL, &feed.Title, &sourceFile, &etag, &lastMod, &checkedAt, &successAt, &status, &lastError); err != nil {
+		if err := rows.Scan(&feed.URL, &feed.Title, &allowTitleOnly, &sourceFile, &etag, &lastMod, &checkedAt, &successAt, &status, &lastError); err != nil {
 			continue
 		}
+		feed.AllowTitleOnly = boolPtrFromNull(allowTitleOnly)
 		feed.SourceFile = sourceFile.String
 		feed.ETag = etag.String
 		feed.LastMod = lastMod.String
@@ -420,6 +476,309 @@ func (s *Store) UpsertArticle(article model.Article) (bool, error) {
 		return false, fmt.Errorf("upsert article %s: %w", article.ID, err)
 	}
 	return existing == 0, nil
+}
+
+func (s *Store) UpsertArticleContent(content model.ArticleContent) (bool, error) {
+	var existingHash, existingStatus, existingResolvedURL, existingSourceType, existingError sql.NullString
+	existing := 0
+	err := s.db.QueryRow(`
+		SELECT content_hash, fetch_status, resolved_url, source_type, error_message
+		FROM article_contents
+		WHERE article_id = ?
+	`, content.ArticleID).Scan(&existingHash, &existingStatus, &existingResolvedURL, &existingSourceType, &existingError)
+	if err == nil {
+		existing = 1
+	} else if err != sql.ErrNoRows {
+		return false, fmt.Errorf("check article content %s: %w", content.ArticleID, err)
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO article_contents (
+			article_id, resolved_url, fetch_status, source_type, content_text, content_html, content_hash, fetched_at, error_message
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(article_id) DO UPDATE SET
+			resolved_url = excluded.resolved_url,
+			fetch_status = excluded.fetch_status,
+			source_type = excluded.source_type,
+			content_text = excluded.content_text,
+			content_html = excluded.content_html,
+			content_hash = excluded.content_hash,
+			fetched_at = excluded.fetched_at,
+			error_message = excluded.error_message
+	`,
+		content.ArticleID,
+		nullIfEmpty(content.ResolvedURL),
+		defaultString(content.FetchStatus, model.ContentStatusPending),
+		nullIfEmpty(content.SourceType),
+		nullIfEmpty(content.ContentText),
+		nullIfEmpty(content.ContentHTML),
+		nullIfEmpty(content.ContentHash),
+		nullTimePtr(content.FetchedAt),
+		nullIfEmpty(content.ErrorMessage),
+	)
+	if err != nil {
+		return false, fmt.Errorf("upsert article content %s: %w", content.ArticleID, err)
+	}
+
+	changed := existing == 0 ||
+		existingHash.String != content.ContentHash ||
+		existingStatus.String != defaultString(content.FetchStatus, model.ContentStatusPending) ||
+		existingResolvedURL.String != content.ResolvedURL ||
+		existingSourceType.String != content.SourceType ||
+		existingError.String != content.ErrorMessage
+	return changed, nil
+}
+
+func (s *Store) ArticleContent(articleID string) *model.ArticleContent {
+	row := s.db.QueryRow(`
+		SELECT article_id, resolved_url, fetch_status, source_type, content_text, content_html, content_hash, fetched_at, error_message
+		FROM article_contents
+		WHERE article_id = ?
+	`, articleID)
+
+	var content model.ArticleContent
+	var resolvedURL, sourceType, contentText, contentHTML, contentHash, fetchedAt, errorMessage sql.NullString
+	if err := row.Scan(&content.ArticleID, &resolvedURL, &content.FetchStatus, &sourceType, &contentText, &contentHTML, &contentHash, &fetchedAt, &errorMessage); err != nil {
+		return nil
+	}
+	content.ResolvedURL = resolvedURL.String
+	content.SourceType = sourceType.String
+	content.ContentText = contentText.String
+	content.ContentHTML = contentHTML.String
+	content.ContentHash = contentHash.String
+	content.FetchedAt = parseTimePtr(fetchedAt)
+	content.ErrorMessage = errorMessage.String
+	return &content
+}
+
+func (s *Store) ListArticlesForContentFetch(limit int, force bool) ([]model.Article, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := `
+		SELECT a.id
+		FROM articles a
+		LEFT JOIN article_contents c ON c.article_id = a.id
+	`
+	args := []any{}
+	if !force {
+		query += ` WHERE c.article_id IS NULL OR c.fetch_status IN (?, ?, ?)`
+		args = append(args, model.ContentStatusPending, model.ContentStatusFailed, model.ContentStatusRSSFallback)
+	}
+	query += ` ORDER BY COALESCE(a.last_seen_at, a.first_seen_at) DESC, a.id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list articles for content fetch: %w", err)
+	}
+	defer rows.Close()
+
+	articles := make([]model.Article, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan content article id: %w", err)
+		}
+		article, err := s.findArticle(id)
+		if err != nil {
+			return nil, err
+		}
+		if article != nil {
+			articles = append(articles, *article)
+		}
+	}
+	return articles, nil
+}
+
+func (s *Store) ListArticlesByContentStatus(status string, limit int) ([]model.Article, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	status = strings.TrimSpace(status)
+
+	query := `
+		SELECT a.id
+		FROM articles a
+		LEFT JOIN article_contents c ON c.article_id = a.id
+	`
+	args := []any{}
+	switch status {
+	case "missing":
+		query += ` WHERE c.article_id IS NULL`
+	default:
+		query += ` WHERE c.fetch_status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY COALESCE(c.fetched_at, a.last_seen_at, a.first_seen_at) DESC, a.id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list articles by content status: %w", err)
+	}
+	defer rows.Close()
+
+	articles := make([]model.Article, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan content status article id: %w", err)
+		}
+		article, err := s.findArticle(id)
+		if err != nil {
+			return nil, err
+		}
+		if article != nil {
+			articles = append(articles, *article)
+		}
+	}
+	return articles, nil
+}
+
+func (s *Store) ListArticlesMissingProcessorResult(processor string, limit int) ([]model.Article, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	processor = strings.TrimSpace(processor)
+	rows, err := s.db.Query(`
+		SELECT a.id
+		FROM articles a
+		WHERE NOT EXISTS (
+			SELECT 1 FROM ai_results r WHERE r.article_id = a.id AND r.processor = ?
+		)
+		ORDER BY COALESCE(a.last_seen_at, a.first_seen_at) DESC, a.id DESC
+		LIMIT ?
+	`, processor, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list articles missing processor result: %w", err)
+	}
+	defer rows.Close()
+
+	articles := make([]model.Article, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan missing processor article id: %w", err)
+		}
+		article, err := s.findArticle(id)
+		if err != nil {
+			return nil, err
+		}
+		if article != nil {
+			articles = append(articles, *article)
+		}
+	}
+	return articles, nil
+}
+
+func (s *Store) SaveAIResult(result model.ProcessorResult) error {
+	_, err := s.db.Exec(`
+		INSERT INTO ai_results (
+			article_id, processor, model, input_hash, status, output_json, raw_response, processed_at, error_message
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(article_id, processor, input_hash) DO UPDATE SET
+			model = excluded.model,
+			status = excluded.status,
+			output_json = excluded.output_json,
+			raw_response = excluded.raw_response,
+			processed_at = excluded.processed_at,
+			error_message = excluded.error_message
+	`,
+		result.ArticleID,
+		result.Processor,
+		nullIfEmpty(result.Model),
+		result.InputHash,
+		defaultString(result.Status, model.ProcessorStatusPending),
+		nullIfEmpty(result.OutputJSON),
+		nullIfEmpty(result.RawResponse),
+		timeString(result.ProcessedAt),
+		nullIfEmpty(result.ErrorMessage),
+	)
+	if err != nil {
+		return fmt.Errorf("save ai result %s/%s: %w", result.ArticleID, result.Processor, err)
+	}
+	return nil
+}
+
+func (s *Store) HasProcessedAIResult(articleID, processor, inputHash string) bool {
+	var count int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(1)
+		FROM ai_results
+		WHERE article_id = ? AND processor = ? AND input_hash = ? AND status = ?
+	`, articleID, processor, inputHash, model.ProcessorStatusProcessed).Scan(&count); err != nil {
+		return false
+	}
+	return count > 0
+}
+
+func (s *Store) LatestAIResult(articleID, processor string) *model.ProcessorResult {
+	row := s.db.QueryRow(`
+		SELECT article_id, processor, model, input_hash, status, output_json, raw_response, processed_at, error_message
+		FROM ai_results
+		WHERE article_id = ? AND processor = ?
+		ORDER BY processed_at DESC, id DESC
+		LIMIT 1
+	`, articleID, processor)
+
+	var result model.ProcessorResult
+	var modelName, outputJSON, rawResponse, processedAt, errorMessage sql.NullString
+	if err := row.Scan(&result.ArticleID, &result.Processor, &modelName, &result.InputHash, &result.Status, &outputJSON, &rawResponse, &processedAt, &errorMessage); err != nil {
+		return nil
+	}
+	result.Model = modelName.String
+	result.OutputJSON = outputJSON.String
+	result.RawResponse = rawResponse.String
+	result.ProcessedAt = parseTime(processedAt)
+	result.ErrorMessage = errorMessage.String
+	return &result
+}
+
+func (s *Store) LatestAIResults(articleID string) []model.ProcessorResult {
+	rows, err := s.db.Query(`
+		SELECT article_id, processor, model, input_hash, status, output_json, raw_response, processed_at, error_message
+		FROM ai_results
+		WHERE article_id = ?
+		ORDER BY processed_at DESC, id DESC
+	`, articleID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	results := make([]model.ProcessorResult, 0)
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var result model.ProcessorResult
+		var modelName, outputJSON, rawResponse, processedAt, errorMessage sql.NullString
+		if err := rows.Scan(&result.ArticleID, &result.Processor, &modelName, &result.InputHash, &result.Status, &outputJSON, &rawResponse, &processedAt, &errorMessage); err != nil {
+			continue
+		}
+		if _, ok := seen[result.Processor]; ok {
+			continue
+		}
+		seen[result.Processor] = struct{}{}
+		result.Model = modelName.String
+		result.OutputJSON = outputJSON.String
+		result.RawResponse = rawResponse.String
+		result.ProcessedAt = parseTime(processedAt)
+		result.ErrorMessage = errorMessage.String
+		results = append(results, result)
+	}
+	return results
+}
+
+func (s *Store) LatestAIResultsMap(articleID string) map[string]model.ProcessorResult {
+	results := s.LatestAIResults(articleID)
+	if len(results) == 0 {
+		return nil
+	}
+	items := make(map[string]model.ProcessorResult, len(results))
+	for _, result := range results {
+		items[result.Processor] = result
+	}
+	return items
 }
 
 func (s *Store) SaveScore(articleID string, score model.Score) error {
@@ -604,6 +963,53 @@ func (s *Store) ListArticles(opts ListArticlesOptions) ([]model.Article, error) 
 	return articles, nil
 }
 
+func (s *Store) ListArticlesByLatestProcessorStatus(processor, status string, limit int) ([]model.Article, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	processor = strings.TrimSpace(processor)
+	status = strings.TrimSpace(status)
+	rows, err := s.db.Query(`
+		SELECT article_id, status
+		FROM ai_results
+		WHERE processor = ?
+		ORDER BY processed_at DESC, id DESC
+	`, processor)
+	if err != nil {
+		return nil, fmt.Errorf("list articles by processor status: %w", err)
+	}
+	defer rows.Close()
+
+	articles := make([]model.Article, 0, limit)
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var articleID string
+		var resultStatus string
+		if err := rows.Scan(&articleID, &resultStatus); err != nil {
+			return nil, fmt.Errorf("scan processor status article: %w", err)
+		}
+		if _, ok := seen[articleID]; ok {
+			continue
+		}
+		seen[articleID] = struct{}{}
+		if status != "" && resultStatus != status {
+			continue
+		}
+		article, err := s.findArticle(articleID)
+		if err != nil {
+			return nil, err
+		}
+		if article == nil {
+			continue
+		}
+		articles = append(articles, *article)
+		if len(articles) >= limit {
+			break
+		}
+	}
+	return articles, nil
+}
+
 func (s *Store) DeleteReport(date string) error {
 	_, err := s.db.Exec(`DELETE FROM reports WHERE report_date = ?`, date)
 	if err != nil {
@@ -625,10 +1031,61 @@ func (s *Store) AppendRun(run model.Run) error {
 }
 
 func (s *Store) Stats() Stats {
-	stats := Stats{}
+	stats := Stats{
+		ContentByStatus:       map[string]int{},
+		ProcessorLatestStatus: map[string]map[string]int{},
+	}
 	_ = s.db.QueryRow(`SELECT COUNT(1) FROM feeds`).Scan(&stats.Feeds)
 	_ = s.db.QueryRow(`SELECT COUNT(1) FROM articles`).Scan(&stats.Articles)
 	_ = s.db.QueryRow(`SELECT COUNT(1) FROM articles WHERE score_status = 'scored'`).Scan(&stats.ScoredArticles)
+	_ = s.db.QueryRow(`SELECT COUNT(1) FROM article_contents WHERE fetch_status = ?`, model.ContentStatusFetched).Scan(&stats.ContentFetched)
+	_ = s.db.QueryRow(`SELECT COUNT(1) FROM article_contents WHERE fetch_status = ?`, model.ContentStatusRSSFallback).Scan(&stats.ContentFallbacks)
+	_ = s.db.QueryRow(`
+		SELECT COUNT(1)
+		FROM articles a
+		LEFT JOIN article_contents c ON c.article_id = a.id
+		WHERE c.article_id IS NULL
+	`).Scan(&stats.ContentMissing)
+
+	rows, err := s.db.Query(`SELECT fetch_status, COUNT(1) FROM article_contents GROUP BY fetch_status`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var status string
+			var count int
+			if scanErr := rows.Scan(&status, &count); scanErr != nil {
+				continue
+			}
+			stats.ContentByStatus[status] = count
+		}
+	}
+
+	_ = s.db.QueryRow(`SELECT COUNT(1) FROM ai_results`).Scan(&stats.AIResults)
+	rows, err = s.db.Query(`
+		SELECT article_id, processor, status
+		FROM ai_results
+		ORDER BY processor ASC, article_id ASC, processed_at DESC, id DESC
+	`)
+	if err == nil {
+		defer rows.Close()
+		seen := make(map[string]struct{})
+		for rows.Next() {
+			var articleID, processor, status string
+			if scanErr := rows.Scan(&articleID, &processor, &status); scanErr != nil {
+				continue
+			}
+			key := processor + "\x00" + articleID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			if _, ok := stats.ProcessorLatestStatus[processor]; !ok {
+				stats.ProcessorLatestStatus[processor] = map[string]int{}
+			}
+			stats.ProcessorLatestStatus[processor][status]++
+		}
+	}
+
 	_ = s.db.QueryRow(`SELECT COUNT(1) FROM reports`).Scan(&stats.Reports)
 	_ = s.db.QueryRow(`SELECT COUNT(1) FROM runs`).Scan(&stats.Runs)
 	return stats
@@ -735,6 +1192,13 @@ func nullIfEmpty(value string) any {
 	return value
 }
 
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
 func nullTime(value time.Time) any {
 	if value.IsZero() {
 		return nil
@@ -747,6 +1211,13 @@ func nullTimePtr(value *time.Time) any {
 		return nil
 	}
 	return timeString(*value)
+}
+
+func nullBoolPtr(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func timeString(value time.Time) string {
@@ -773,4 +1244,12 @@ func parseTimePtr(value sql.NullString) *time.Time {
 		return nil
 	}
 	return &parsed
+}
+
+func boolPtrFromNull(value sql.NullBool) *bool {
+	if !value.Valid {
+		return nil
+	}
+	clone := value.Bool
+	return &clone
 }

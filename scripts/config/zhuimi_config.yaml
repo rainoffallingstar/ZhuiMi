@@ -4,6 +4,8 @@
 rss:
   days_window: 3 # 抓取最近几天的文章
   max_feeds: 100 # 最多使用的RSS源数量
+  filter_title_only: true # 是否过滤 description 为空或与标题相同的条目
+  allow_title_only_for: "" # 例外放行的域名或Feed URL，逗号分隔
 
 # AI评分配置
 ai:
@@ -12,6 +14,22 @@ ai:
   temperature: 1
   timeout_seconds: 120
   score_rate_limit: 1 # 模型评分速率限制（每秒请求数）
+
+# 正文获取配置
+content:
+  enabled: true
+  concurrency: 4
+  timeout_seconds: 20
+  max_bytes: 2097152
+  user_agent: "ZhuiMi/1.0"
+  store_html: false
+
+# AI处理器配置
+processors:
+  enabled: "generic_digest" # 推荐首发只开 generic_digest；需要 AML 日报时再加上 aml_score
+  default: "generic_digest" # 兼容保留，当前运行时以 enabled 为准
+  generic_digest_model: "" # 留空时回退到 ai.model
+  aml_score_model: "" # 留空时回退到 ai.model
 
 # 评分维度说明
 dimensions:

@@ -35,7 +35,7 @@ jobs:
       - name: Verify Go build
         run: go test ./...
 
-      - name: Import PubMed feeds
+      - name: Import RSS feeds
         env:
           ZHUIMI_STATE_PATH: data/zhuimi/store.db
         run: go run ./cmd/zhuimi feeds import
@@ -49,11 +49,32 @@ jobs:
           ZHUIMI_STATE_PATH: data/zhuimi/store.db
         run: |
           set -euo pipefail
-          report_date="$(date +%F)"
-          go run ./cmd/zhuimi run daily --pdf
-          pdf_path="content/ZhuiMi/${report_date}/index.pdf"
-          test -f "$pdf_path"
+          output="$(go run ./cmd/zhuimi run daily --pdf)"
+          echo "$output"
+          export ZHUIMI_DAILY_OUTPUT="$output"
+          report_date="$(python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"])
+print(payload.get("report_date", ""))
+PY
+)"
+          report_written="$(python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"])
+print(str(bool(payload.get("report_written", False))).lower())
+PY
+)"
+          pdf_path=""
+          if [ "$report_written" = "true" ]; then
+            pdf_path="content/ZhuiMi/${report_date}/index.pdf"
+            test -f "$pdf_path"
+          fi
           echo "report_date=$report_date" >> "$GITHUB_OUTPUT"
+          echo "report_written=$report_written" >> "$GITHUB_OUTPUT"
           echo "pdf_path=$pdf_path" >> "$GITHUB_OUTPUT"
 
       - name: Finalize SQLite store for commit
@@ -64,7 +85,7 @@ jobs:
       - name: Stage reports and state
         id: changes
         run: |
-          git add content/ZhuiMi/ scripts/pubmed_feeds.json data/zhuimi/store.db
+          git add content/ZhuiMi/ scripts/feeds.json data/zhuimi/store.db
           if git diff --staged --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -72,6 +93,7 @@ jobs:
           fi
 
       - name: Upload generated PDF artifacts
+        if: steps.daily.outputs.report_written == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: zhuimi-report-${{ steps.daily.outputs.report_date }}
@@ -87,6 +109,7 @@ jobs:
           git push
 
       - name: Publish daily PDF to release
+        if: steps.daily.outputs.report_written == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

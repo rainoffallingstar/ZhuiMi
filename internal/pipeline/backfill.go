@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"zhuimi/internal/config"
@@ -20,7 +19,8 @@ func RunBackfill(ctx context.Context, cfg config.Config, db *store.Store, days i
 		days = 1
 	}
 	cfg.DaysWindow = days
-	reportMode := opts.ReportMode()
+	processorNames := enabledProcessorNames(cfg, opts, nil)
+	reportMode := reportModeForRun(opts, processorNames)
 
 	run := model.Run{ID: model.BuildArticleID("", "", time.Now().UTC().Format(time.RFC3339Nano)), Mode: "run_backfill", StartedAt: time.Now().UTC(), Status: "running"}
 	defer func() {
@@ -44,7 +44,9 @@ func RunBackfill(ctx context.Context, cfg config.Config, db *store.Store, days i
 	results := feed.FetchFeeds(ctx, cfg, feeds)
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
-	articlesToScore := make([]model.Article, 0)
+	touchedArticles := make([]model.Article, 0)
+	existingByID := make(map[string]*model.Article)
+	newByID := make(map[string]bool)
 	touchedDates := map[string]struct{}{}
 	fetchedCount := 0
 	newCount := 0
@@ -63,23 +65,8 @@ func RunBackfill(ctx context.Context, cfg config.Config, db *store.Store, days i
 			if item.PubDate == nil || item.PubDate.Before(cutoff) {
 				continue
 			}
-			if item.Description == "" {
-				continue
-			}
 			fetchedCount++
-			article := model.Article{
-				DOI:           item.DOI,
-				CanonicalLink: model.CanonicalizeLink(item.Link),
-				Title:         item.Title,
-				Abstract:      item.Description,
-				PublishedAt:   item.PubDate,
-				FeedURL:       item.FeedURL,
-				Link:          item.Link,
-				FirstSeenAt:   now,
-				LastSeenAt:    now,
-				ContentHash:   model.HashContent(item.Title, item.Description, item.Link),
-			}
-			article.ID = model.BuildArticleID(article.DOI, article.CanonicalLink, article.Title)
+			article := buildArticleFromFeedItem(feedItem(item), now)
 			existing := db.FindArticle(article.ID)
 			isNew, err := db.UpsertArticle(article)
 			if err != nil {
@@ -87,6 +74,13 @@ func RunBackfill(ctx context.Context, cfg config.Config, db *store.Store, days i
 				run.ErrorMessage = err.Error()
 				return err
 			}
+			if _, ok := existingByID[article.ID]; !ok {
+				existingByID[article.ID] = existing
+			}
+			if isNew {
+				newByID[article.ID] = true
+			}
+			touchedArticles = append(touchedArticles, article)
 			if date := publishedDate(article); date != "" {
 				touchedDates[date] = struct{}{}
 			}
@@ -100,32 +94,39 @@ func RunBackfill(ctx context.Context, cfg config.Config, db *store.Store, days i
 				newCount++
 				if db.HasProcessedID(article.ID) {
 					_ = db.SetArticleStatus(article.ID, "processed", "legacy_processed")
-					continue
 				}
-				articlesToScore = append(articlesToScore, article)
 				continue
-			}
-			if existing != nil && ((existing.LatestScore == nil && strings.TrimSpace(existing.ScoreStatus) == "") || existing.ScoreStatus == "failed") {
-				merged := *existing
-				merged.Title = article.Title
-				merged.Abstract = article.Abstract
-				merged.Link = article.Link
-				merged.CanonicalLink = article.CanonicalLink
-				merged.PublishedAt = article.PublishedAt
-				articlesToScore = append(articlesToScore, merged)
 			}
 		}
 	}
 
 	run.ArticlesFetched = fetchedCount
 	run.ArticlesNew = newCount
-	if !opts.SkipScoring {
-		if err := scoreArticles(ctx, cfg, db, articlesToScore); err != nil {
+	states := buildTouchedArticleStates(db, touchedArticles, existingByID, newByID)
+	contentMap := buildContentMap(states)
+	contentTasks := buildContentFetchTasks(states, cfg.ContentEnabled)
+	contentReasonStats := contentTaskReasonCounts(contentTasks)
+	fetchedContents, contentChanged, err := fetchArticleContents(ctx, cfg, db, contentTasks)
+	if err != nil {
+		run.Status = "failed"
+		run.ErrorMessage = err.Error()
+		return err
+	}
+	for articleID, content := range fetchedContents {
+		contentMap[articleID] = content
+	}
+	processorTasks := []ProcessorTask(nil)
+	processorReasonStats := map[string]int{}
+	if len(processorNames) > 0 {
+		processorTasks = buildProcessorTasks(states, contentMap, processorNames)
+		processorReasonStats = processorTaskReasonCounts(processorTasks)
+		processedCount, err := processArticles(ctx, cfg, db, processorTasks)
+		if err != nil {
 			run.Status = "failed"
 			run.ErrorMessage = err.Error()
 			return err
 		}
-		run.ArticlesScored = len(articlesToScore)
+		run.ArticlesScored = processedCount
 	}
 
 	dates := make([]string, 0, len(touchedDates))
@@ -148,7 +149,21 @@ func RunBackfill(ctx context.Context, cfg config.Config, db *store.Store, days i
 
 	run.Status = "ok"
 	run.FinishedAt = time.Now().UTC()
-	payload := map[string]any{"feeds": len(feeds), "fetched": fetchedCount, "new": newCount, "scored": len(articlesToScore), "reports": len(dates), "days": days, "mode": reportMode, "pdf": opts.CompilePDF}
+	payload := map[string]any{
+		"feeds":             len(feeds),
+		"fetched":           fetchedCount,
+		"new":               newCount,
+		"content_tasks":     len(contentTasks),
+		"content_changed":   contentChanged,
+		"content_reasons":   contentReasonStats,
+		"processor_tasks":   len(processorTasks),
+		"processor_reasons": processorReasonStats,
+		"processed":         run.ArticlesScored,
+		"reports":           len(dates),
+		"days":              days,
+		"mode":              reportMode,
+		"pdf":               opts.CompilePDF,
+	}
 	encoded, _ := json.Marshal(payload)
 	fmt.Println(string(encoded))
 	return nil

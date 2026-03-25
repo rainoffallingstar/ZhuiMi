@@ -22,10 +22,11 @@ func TestImportOPMLFeedsPreservesStateAndInactivatesMissingFeeds(t *testing.T) {
 	opml := `<?xml version="1.0" encoding="UTF-8"?>
 <opml version="2.0">
   <body>
-    <outline text="PubMed">
+    <outline text="Mixed Feeds">
       <outline text="Imported title" xmlUrl="https://pubmed.ncbi.nlm.nih.gov/rss/search/1" />
       <outline text="New feed" xmlUrl="https://pubmed.ncbi.nlm.nih.gov/rss/search/2" />
       <outline text="Reactivated feed" xmlUrl="https://pubmed.ncbi.nlm.nih.gov/rss/search/4" />
+      <outline text="Generic RSS" xmlUrl="https://example.com/feed.xml" allowTitleOnly="true" />
     </outline>
   </body>
 </opml>`
@@ -82,7 +83,7 @@ func TestImportOPMLFeedsPreservesStateAndInactivatesMissingFeeds(t *testing.T) {
 
 	cfg := config.Config{
 		SubscribeDir:  subscribeDir,
-		FeedsJSONPath: filepath.Join(tempDir, "pubmed_feeds.json"),
+		FeedsJSONPath: filepath.Join(tempDir, "feeds.json"),
 		StatePath:     statePath,
 	}
 	if err := ImportOPMLFeeds(cfg, db); err != nil {
@@ -90,8 +91,8 @@ func TestImportOPMLFeedsPreservesStateAndInactivatesMissingFeeds(t *testing.T) {
 	}
 
 	feeds := db.ListFeeds()
-	if len(feeds) != 4 {
-		t.Fatalf("expected 4 feeds, got %d", len(feeds))
+	if len(feeds) != 5 {
+		t.Fatalf("expected 5 feeds, got %d", len(feeds))
 	}
 
 	byURL := make(map[string]model.Feed, len(feeds))
@@ -119,6 +120,12 @@ func TestImportOPMLFeedsPreservesStateAndInactivatesMissingFeeds(t *testing.T) {
 	if got := byURL["https://pubmed.ncbi.nlm.nih.gov/rss/search/2"]; got.Status != "active" {
 		t.Fatalf("expected new feed active, got %q", got.Status)
 	}
+	if got := byURL["https://example.com/feed.xml"]; got.Status != "active" || got.Title != "Generic RSS" {
+		t.Fatalf("expected generic rss feed imported, got status=%q title=%q", got.Status, got.Title)
+	}
+	if got := byURL["https://example.com/feed.xml"]; got.AllowTitleOnly == nil || !*got.AllowTitleOnly {
+		t.Fatalf("expected generic rss feed allow_title_only persisted, got %#v", got.AllowTitleOnly)
+	}
 
 	disabled := byURL["https://pubmed.ncbi.nlm.nih.gov/rss/search/3"]
 	if disabled.Status != "inactive" {
@@ -143,11 +150,24 @@ func TestImportOPMLFeedsPreservesStateAndInactivatesMissingFeeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var exported []map[string]string
+	var exported []struct {
+		URL            string `json:"url"`
+		Title          string `json:"title"`
+		AllowTitleOnly *bool  `json:"allow_title_only,omitempty"`
+	}
 	if err := json.Unmarshal(content, &exported); err != nil {
 		t.Fatal(err)
 	}
-	if len(exported) != 3 {
-		t.Fatalf("expected 3 exported feeds, got %d", len(exported))
+	if len(exported) != 4 {
+		t.Fatalf("expected 4 exported feeds, got %d", len(exported))
+	}
+	foundAllow := false
+	for _, item := range exported {
+		if item.URL == "https://example.com/feed.xml" && item.AllowTitleOnly != nil && *item.AllowTitleOnly {
+			foundAllow = true
+		}
+	}
+	if !foundAllow {
+		t.Fatalf("expected exported feeds json to persist allow_title_only, got %#v", exported)
 	}
 }

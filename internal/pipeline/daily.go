@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"zhuimi/internal/config"
 	"zhuimi/internal/feed"
 	"zhuimi/internal/model"
 	"zhuimi/internal/report"
-	"zhuimi/internal/scoring"
 	"zhuimi/internal/store"
 )
 
@@ -26,7 +24,8 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 		_ = db.AppendRun(run)
 	}()
 
-	reportMode := opts.ReportMode()
+	processorNames := enabledProcessorNames(cfg, opts, nil)
+	reportMode := reportModeForRun(opts, processorNames)
 	feeds, err := loadFeeds(cfg, db)
 	if err != nil {
 		run.Status = "failed"
@@ -41,7 +40,9 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 	results := feed.FetchFeeds(ctx, cfg, feeds)
 	now := time.Now()
 	cutoff := now.Add(-time.Duration(cfg.DaysWindow) * 24 * time.Hour)
-	articlesToScore := make([]model.Article, 0)
+	touchedArticles := make([]model.Article, 0)
+	existingByID := make(map[string]*model.Article)
+	newByID := make(map[string]bool)
 	reportCandidateIDs := map[string]struct{}{}
 	fetchedCount := 0
 	newCount := 0
@@ -59,28 +60,20 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 			if item.PubDate == nil || item.PubDate.Before(cutoff) {
 				continue
 			}
-			if item.Description == "" {
-				continue
-			}
 			fetchedCount++
-			article := model.Article{
-				DOI:           item.DOI,
-				CanonicalLink: model.CanonicalizeLink(item.Link),
-				Title:         item.Title,
-				Abstract:      item.Description,
-				PublishedAt:   item.PubDate,
-				FeedURL:       item.FeedURL,
-				Link:          item.Link,
-				FirstSeenAt:   now.UTC(),
-				LastSeenAt:    now.UTC(),
-				ContentHash:   model.HashContent(item.Title, item.Description, item.Link),
-			}
-			article.ID = model.BuildArticleID(article.DOI, article.CanonicalLink, article.Title)
+			article := buildArticleFromFeedItem(feedItem(item), now)
 			existing := db.FindArticle(article.ID)
 			isNew, err := db.UpsertArticle(article)
 			if err != nil {
 				return err
 			}
+			if _, ok := existingByID[article.ID]; !ok {
+				existingByID[article.ID] = existing
+			}
+			if isNew {
+				newByID[article.ID] = true
+			}
+			touchedArticles = append(touchedArticles, article)
 			reportCandidateIDs[article.ID] = struct{}{}
 			if opts.SkipScoring {
 				if isNew {
@@ -92,18 +85,8 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 				newCount++
 				if db.HasProcessedID(article.ID) {
 					_ = db.SetArticleStatus(article.ID, "processed", "legacy_processed")
-					continue
 				}
-				articlesToScore = append(articlesToScore, article)
 				continue
-			}
-			if existing != nil && existing.LatestScore == nil && strings.TrimSpace(existing.ScoreStatus) == "" {
-				merged := *existing
-				merged.Title = article.Title
-				merged.Abstract = article.Abstract
-				merged.Link = article.Link
-				merged.CanonicalLink = article.CanonicalLink
-				articlesToScore = append(articlesToScore, merged)
 			}
 		}
 	}
@@ -111,13 +94,32 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 	run.ArticlesFetched = fetchedCount
 	run.ArticlesNew = newCount
 
-	if !opts.SkipScoring {
-		if err := scoreArticles(ctx, cfg, db, articlesToScore); err != nil {
+	states := buildTouchedArticleStates(db, touchedArticles, existingByID, newByID)
+	contentMap := buildContentMap(states)
+	contentTasks := buildContentFetchTasks(states, cfg.ContentEnabled)
+	contentReasonStats := contentTaskReasonCounts(contentTasks)
+	fetchedContents, contentChanged, err := fetchArticleContents(ctx, cfg, db, contentTasks)
+	if err != nil {
+		run.Status = "failed"
+		run.ErrorMessage = err.Error()
+		return err
+	}
+	for articleID, content := range fetchedContents {
+		contentMap[articleID] = content
+	}
+
+	processorTasks := []ProcessorTask(nil)
+	processorReasonStats := map[string]int{}
+	if len(processorNames) > 0 {
+		processorTasks = buildProcessorTasks(states, contentMap, processorNames)
+		processorReasonStats = processorTaskReasonCounts(processorTasks)
+		processedCount, err := processArticles(ctx, cfg, db, processorTasks)
+		if err != nil {
 			run.Status = "failed"
 			run.ErrorMessage = err.Error()
 			return err
 		}
-		run.ArticlesScored = len(articlesToScore)
+		run.ArticlesScored = processedCount
 	}
 
 	today := now.Format("2006-01-02")
@@ -132,7 +134,8 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 			reportArticleIDs[id] = struct{}{}
 		}
 	} else {
-		for _, article := range articlesToScore {
+		for _, state := range states {
+			article := state.Article
 			stored := db.FindArticle(article.ID)
 			if shouldInclude(stored) {
 				reportArticleIDs[article.ID] = struct{}{}
@@ -147,10 +150,11 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 	articles := db.ArticlesByIDs(orderedIDs)
 	filtered, orderedIDs := prepareReportArticles(articles, reportMode, cfg.SortBy)
 	filtered, orderedIDs = filterArticlesForPDF(filtered, reportMode, opts.CompilePDF)
+	reportWritten := false
 	if len(filtered) == 0 {
 		run.Status = "ok"
 		run.FinishedAt = time.Now().UTC()
-		return nil
+		return printDailyStats(len(feeds), fetchedCount, newCount, len(contentTasks), contentChanged, contentReasonStats, len(processorTasks), processorReasonStats, run.ArticlesScored, today, reportMode, opts.CompilePDF, reportWritten, 0)
 	}
 
 	if err := db.SaveReport(model.Report{Date: today, ArticleIDs: orderedIDs, UpdatedAt: time.Now().UTC(), Mode: reportMode}); err != nil {
@@ -175,12 +179,32 @@ func RunDaily(ctx context.Context, cfg config.Config, db *store.Store, opts RunO
 		run.ErrorMessage = err.Error()
 		return err
 	}
+	reportWritten = true
 
 	run.ReportDate = today
 	run.Status = "ok"
 	run.FinishedAt = time.Now().UTC()
 
-	stats := map[string]any{"feeds": len(feeds), "fetched": fetchedCount, "new": newCount, "scored": len(articlesToScore), "report_date": today, "mode": reportMode, "pdf": opts.CompilePDF}
+	return printDailyStats(len(feeds), fetchedCount, newCount, len(contentTasks), contentChanged, contentReasonStats, len(processorTasks), processorReasonStats, run.ArticlesScored, today, reportMode, opts.CompilePDF, reportWritten, len(filtered))
+}
+
+func printDailyStats(feeds, fetched, newCount, contentTasks, contentChanged int, contentReasons map[string]int, processorTasks int, processorReasons map[string]int, processed int, reportDate, reportMode string, pdf, reportWritten bool, reportArticles int) error {
+	stats := map[string]any{
+		"feeds":             feeds,
+		"fetched":           fetched,
+		"new":               newCount,
+		"content_tasks":     contentTasks,
+		"content_changed":   contentChanged,
+		"content_reasons":   contentReasons,
+		"processor_tasks":   processorTasks,
+		"processor_reasons": processorReasons,
+		"processed":         processed,
+		"report_date":       reportDate,
+		"report_written":    reportWritten,
+		"report_articles":   reportArticles,
+		"mode":              reportMode,
+		"pdf":               pdf,
+	}
 	encoded, _ := json.Marshal(stats)
 	fmt.Println(string(encoded))
 	return nil
@@ -191,25 +215,42 @@ func loadFeeds(cfg config.Config, db *store.Store) ([]model.Feed, error) {
 	if len(allFeeds) > 0 {
 		return filterActiveFeeds(allFeeds), nil
 	}
-	content, err := os.ReadFile(cfg.FeedsJSONPath)
+	content, err := readFeedsJSON(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("read feeds json: %w", err)
+		return nil, err
 	}
 	var rows []struct {
-		URL   string `json:"url"`
-		Title string `json:"title"`
+		URL            string `json:"url"`
+		Title          string `json:"title"`
+		AllowTitleOnly *bool  `json:"allow_title_only,omitempty"`
 	}
 	if err := json.Unmarshal(content, &rows); err != nil {
 		return nil, fmt.Errorf("decode feeds json: %w", err)
 	}
 	feeds := make([]model.Feed, 0, len(rows))
 	for _, row := range rows {
-		feeds = append(feeds, model.Feed{URL: row.URL, Title: row.Title, Status: "active"})
+		feeds = append(feeds, model.Feed{URL: row.URL, Title: row.Title, AllowTitleOnly: row.AllowTitleOnly, Status: "active"})
 	}
 	if err := db.UpsertFeeds(feeds); err != nil {
 		return nil, err
 	}
 	return feeds, nil
+}
+
+func readFeedsJSON(cfg config.Config) ([]byte, error) {
+	content, err := os.ReadFile(cfg.FeedsJSONPath)
+	if err == nil {
+		return content, nil
+	}
+	if !os.IsNotExist(err) || strings.TrimSpace(cfg.LegacyFeedsPath) == "" {
+		return nil, fmt.Errorf("read feeds json: %w", err)
+	}
+
+	content, legacyErr := os.ReadFile(cfg.LegacyFeedsPath)
+	if legacyErr != nil {
+		return nil, fmt.Errorf("read feeds json: %w", err)
+	}
+	return content, nil
 }
 
 func filterActiveFeeds(feeds []model.Feed) []model.Feed {
@@ -221,70 +262,6 @@ func filterActiveFeeds(feeds []model.Feed) []model.Feed {
 		active = append(active, item)
 	}
 	return active
-}
-
-func scoreArticles(ctx context.Context, cfg config.Config, db *store.Store, articles []model.Article) error {
-	if len(articles) == 0 {
-		return nil
-	}
-	client := scoring.NewClient(cfg)
-	waitToken, stopLimiter := newScoreRateLimiter(cfg.ScoreRateLimit)
-	defer stopLimiter()
-	jobs := make(chan model.Article)
-	results := make(chan scoreResult, len(articles))
-	workers := cfg.ScoreConcurrency
-	if workers > len(articles) {
-		workers = len(articles)
-	}
-	progress := newScoreProgress(len(articles), workers)
-	progress.Start()
-
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for article := range jobs {
-				if err := waitToken(ctx); err != nil {
-					results <- scoreResult{Article: article, FatalErr: err}
-					return
-				}
-				score, err := client.ScoreArticle(ctx, article)
-				if err != nil {
-					if markErr := db.MarkScoreFailed(article.ID, err.Error(), time.Now().UTC()); markErr != nil {
-						results <- scoreResult{Article: article, FatalErr: markErr}
-						continue
-					}
-					results <- scoreResult{Article: article, ScoreErr: err}
-					continue
-				}
-				if err := db.SaveScore(article.ID, score); err != nil {
-					results <- scoreResult{Article: article, FatalErr: err}
-					continue
-				}
-				results <- scoreResult{Article: article}
-			}
-		}()
-	}
-
-	go func() {
-		for _, article := range articles {
-			jobs <- article
-		}
-		close(jobs)
-		wg.Wait()
-		close(results)
-	}()
-
-	var fatalErr error
-	for result := range results {
-		progress.Advance(result)
-		if result.FatalErr != nil && fatalErr == nil {
-			fatalErr = result.FatalErr
-		}
-	}
-	progress.Done()
-	return fatalErr
 }
 
 func newScoreRateLimiter(limit int) (func(context.Context) error, func()) {

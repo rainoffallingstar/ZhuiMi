@@ -24,3 +24,11 @@ func TestExtractDOIHandlesEscapes(t *testing.T) {
 		t.Fatalf("unexpected doi: %s", got)
 	}
 }
+
+func TestHashContentSortsInputs(t *testing.T) {
+	left := HashContent("b", "a", "c")
+	right := HashContent("c", "b", "a")
+	if left != right {
+		t.Fatalf("expected stable hash ordering, got %q vs %q", left, right)
+	}
+}

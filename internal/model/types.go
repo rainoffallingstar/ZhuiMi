@@ -17,18 +17,30 @@ var nonWordPattern = regexp.MustCompile(`[^\pL\pN\s]+`)
 const (
 	ReportModeScored = "scored"
 	ReportModeRaw    = "raw"
+
+	ContentStatusPending     = "pending"
+	ContentStatusFetched     = "fetched"
+	ContentStatusRSSFallback = "rss_fallback"
+	ContentStatusFailed      = "failed"
+	ContentStatusSkipped     = "skipped"
+
+	ProcessorStatusPending   = "pending"
+	ProcessorStatusProcessed = "processed"
+	ProcessorStatusFailed    = "failed"
+	ProcessorStatusSkipped   = "skipped"
 )
 
 type Feed struct {
-	URL        string    `json:"url"`
-	Title      string    `json:"title"`
-	SourceFile string    `json:"source_file,omitempty"`
-	ETag       string    `json:"etag,omitempty"`
-	LastMod    string    `json:"last_modified,omitempty"`
-	CheckedAt  time.Time `json:"checked_at,omitempty"`
-	SuccessAt  time.Time `json:"success_at,omitempty"`
-	Status     string    `json:"status,omitempty"`
-	LastError  string    `json:"last_error,omitempty"`
+	URL            string    `json:"url"`
+	Title          string    `json:"title"`
+	AllowTitleOnly *bool     `json:"allow_title_only,omitempty"`
+	SourceFile     string    `json:"source_file,omitempty"`
+	ETag           string    `json:"etag,omitempty"`
+	LastMod        string    `json:"last_modified,omitempty"`
+	CheckedAt      time.Time `json:"checked_at,omitempty"`
+	SuccessAt      time.Time `json:"success_at,omitempty"`
+	Status         string    `json:"status,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
 }
 
 type Article struct {
@@ -49,6 +61,30 @@ type Article struct {
 	ReportDates    []string   `json:"report_dates,omitempty"`
 	Link           string     `json:"link"`
 	Reason         string     `json:"reason,omitempty"`
+}
+
+type ArticleContent struct {
+	ArticleID    string     `json:"article_id"`
+	ResolvedURL  string     `json:"resolved_url,omitempty"`
+	FetchStatus  string     `json:"fetch_status,omitempty"`
+	SourceType   string     `json:"source_type,omitempty"`
+	ContentText  string     `json:"content_text,omitempty"`
+	ContentHTML  string     `json:"content_html,omitempty"`
+	ContentHash  string     `json:"content_hash,omitempty"`
+	FetchedAt    *time.Time `json:"fetched_at,omitempty"`
+	ErrorMessage string     `json:"error,omitempty"`
+}
+
+type ProcessorResult struct {
+	ArticleID    string    `json:"article_id"`
+	Processor    string    `json:"processor"`
+	Model        string    `json:"model,omitempty"`
+	InputHash    string    `json:"input_hash,omitempty"`
+	Status       string    `json:"status"`
+	OutputJSON   string    `json:"output_json,omitempty"`
+	RawResponse  string    `json:"raw_response,omitempty"`
+	ProcessedAt  time.Time `json:"processed_at"`
+	ErrorMessage string    `json:"error,omitempty"`
 }
 
 type Score struct {

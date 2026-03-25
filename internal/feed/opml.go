@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"zhuimi/internal/config"
@@ -15,17 +16,25 @@ import (
 )
 
 type outline struct {
-	XMLName  xml.Name  `xml:"outline"`
-	Title    string    `xml:"title,attr"`
-	Text     string    `xml:"text,attr"`
-	XMLURL   string    `xml:"xmlUrl,attr"`
-	Children []outline `xml:"outline"`
+	XMLName              xml.Name  `xml:"outline"`
+	Title                string    `xml:"title,attr"`
+	Text                 string    `xml:"text,attr"`
+	XMLURL               string    `xml:"xmlUrl,attr"`
+	AllowTitleOnly       string    `xml:"allowTitleOnly,attr"`
+	ZhuiMiAllowTitleOnly string    `xml:"zhuimiAllowTitleOnly,attr"`
+	Children             []outline `xml:"outline"`
 }
 
 type opmlDocument struct {
 	Body struct {
 		Outlines []outline `xml:"outline"`
 	} `xml:"body"`
+}
+
+type exportedFeed struct {
+	URL            string `json:"url"`
+	Title          string `json:"title"`
+	AllowTitleOnly *bool  `json:"allow_title_only,omitempty"`
 }
 
 func ImportOPMLFeeds(cfg config.Config, db *store.Store) error {
@@ -59,12 +68,12 @@ func ImportOPMLFeeds(cfg config.Config, db *store.Store) error {
 	}
 
 	feeds := make([]model.Feed, 0, len(existingFeeds)+len(feedsMap))
-	legacyFeeds := make([]map[string]string, 0, len(feedsMap))
+	legacyFeeds := make([]exportedFeed, 0, len(feedsMap))
 	newCount := 0
 	updatedCount := 0
 	for _, item := range feedsMap {
 		feeds = append(feeds, item)
-		legacyFeeds = append(legacyFeeds, map[string]string{"url": item.URL, "title": item.Title})
+		legacyFeeds = append(legacyFeeds, exportedFeed{URL: item.URL, Title: item.Title, AllowTitleOnly: item.AllowTitleOnly})
 		if _, ok := existingByURL[item.URL]; ok {
 			updatedCount++
 		} else {
@@ -79,31 +88,52 @@ func ImportOPMLFeeds(cfg config.Config, db *store.Store) error {
 		feeds = append(feeds, item)
 	}
 	sort.Slice(feeds, func(i, j int) bool { return feeds[i].URL < feeds[j].URL })
-	sort.Slice(legacyFeeds, func(i, j int) bool { return legacyFeeds[i]["url"] < legacyFeeds[j]["url"] })
 
 	if err := db.UpsertFeeds(feeds); err != nil {
 		return err
 	}
-
-	if err := os.MkdirAll(filepath.Dir(cfg.FeedsJSONPath), 0o755); err != nil {
-		return fmt.Errorf("create feeds json dir: %w", err)
-	}
-	content, err := json.MarshalIndent(legacyFeeds, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode feeds json: %w", err)
-	}
-	if err := os.WriteFile(cfg.FeedsJSONPath, content, 0o644); err != nil {
-		return fmt.Errorf("write feeds json: %w", err)
+	if err := WriteFeedsJSON(cfg, feeds); err != nil {
+		return err
 	}
 
 	fmt.Printf("imported %d feeds (%d new, %d updated)\n", len(legacyFeeds), newCount, updatedCount)
 	return nil
 }
 
+func WriteFeedsJSON(cfg config.Config, feeds []model.Feed) error {
+	exported := exportedFeedsForJSON(feeds)
+	if err := os.MkdirAll(filepath.Dir(cfg.FeedsJSONPath), 0o755); err != nil {
+		return fmt.Errorf("create feeds json dir: %w", err)
+	}
+	content, err := json.MarshalIndent(exported, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode feeds json: %w", err)
+	}
+	if err := os.WriteFile(cfg.FeedsJSONPath, content, 0o644); err != nil {
+		return fmt.Errorf("write feeds json: %w", err)
+	}
+	return nil
+}
+
+func exportedFeedsForJSON(feeds []model.Feed) []exportedFeed {
+	exported := make([]exportedFeed, 0, len(feeds))
+	for _, item := range feeds {
+		if strings.EqualFold(strings.TrimSpace(item.Status), "inactive") {
+			continue
+		}
+		exported = append(exported, exportedFeed{URL: item.URL, Title: item.Title, AllowTitleOnly: item.AllowTitleOnly})
+	}
+	sort.Slice(exported, func(i, j int) bool { return exported[i].URL < exported[j].URL })
+	return exported
+}
+
 func mergeFeed(imported, existing model.Feed) model.Feed {
 	merged := imported
 	if strings.TrimSpace(merged.Title) == "" {
 		merged.Title = existing.Title
+	}
+	if merged.AllowTitleOnly == nil {
+		merged.AllowTitleOnly = existing.AllowTitleOnly
 	}
 	merged.ETag = existing.ETag
 	merged.LastMod = existing.LastMod
@@ -138,15 +168,34 @@ func parseOPML(path string) ([]model.Feed, error) {
 
 func collectOutlines(item outline, source string) []model.Feed {
 	var feeds []model.Feed
-	if item.XMLURL != "" && strings.Contains(strings.ToLower(item.XMLURL), "pubmed") {
+	if item.XMLURL != "" {
 		title := strings.TrimSpace(item.Title)
 		if title == "" {
 			title = strings.TrimSpace(item.Text)
 		}
-		feeds = append(feeds, model.Feed{URL: strings.TrimSpace(item.XMLURL), Title: title, SourceFile: source, Status: "active"})
+		feeds = append(feeds, model.Feed{
+			URL:            strings.TrimSpace(item.XMLURL),
+			Title:          title,
+			AllowTitleOnly: parseOutlineAllowTitleOnly(item),
+			SourceFile:     source,
+			Status:         "active",
+		})
 	}
 	for _, child := range item.Children {
 		feeds = append(feeds, collectOutlines(child, source)...)
 	}
 	return feeds
+}
+
+func parseOutlineAllowTitleOnly(item outline) *bool {
+	for _, raw := range []string{item.AllowTitleOnly, item.ZhuiMiAllowTitleOnly} {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if parsed, err := strconv.ParseBool(trimmed); err == nil {
+			return &parsed
+		}
+	}
+	return nil
 }
