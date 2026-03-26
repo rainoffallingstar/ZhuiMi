@@ -52,22 +52,8 @@ jobs:
           output="$(go run ./cmd/zhuimi run daily --pdf)"
           echo "$output"
           export ZHUIMI_DAILY_OUTPUT="$output"
-          report_date="$(python3 - <<'PY'
-import json
-import os
-
-payload = json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"])
-print(payload.get("report_date", ""))
-PY
-)"
-          report_written="$(python3 - <<'PY'
-import json
-import os
-
-payload = json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"])
-print(str(bool(payload.get("report_written", False))).lower())
-PY
-)"
+          report_date="$(python3 -c 'import json, os; print(json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"]).get("report_date", ""))')"
+          report_written="$(python3 -c 'import json, os; print(str(bool(json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"]).get("report_written", False))).lower())')"
           pdf_path=""
           if [ "$report_written" = "true" ]; then
             pdf_path="content/ZhuiMi/${report_date}/index.pdf"
