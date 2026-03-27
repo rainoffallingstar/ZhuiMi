@@ -999,12 +999,16 @@ func parseOptionalBool(raw string) (*bool, error) {
 	case "inherit", "default", "":
 		return nil, nil
 	case "true":
-		return boolPtr(true), nil
+		return boolValuePtr(true), nil
 	case "false":
-		return boolPtr(false), nil
+		return boolValuePtr(false), nil
 	default:
 		return nil, fmt.Errorf("expected true, false, or inherit")
 	}
+}
+
+func boolValuePtr(value bool) *bool {
+	return &value
 }
 
 func parseFeedStatus(raw string) (string, error) {
