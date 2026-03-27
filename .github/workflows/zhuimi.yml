@@ -42,6 +42,7 @@ jobs:
 
       - name: Run daily literature update
         id: daily
+        timeout-minutes: 90
         env:
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -50,15 +51,24 @@ jobs:
         run: |
           set -euo pipefail
           ai_enabled="false"
+          cmd=(go run ./cmd/zhuimi run daily --pdf)
           if [ -n "${OPENAI_API_KEY:-}" ]; then
             export ZHUIMI_PROCESSORS_ENABLED="generic_digest,aml_score"
             ai_enabled="true"
-            output="$(go run ./cmd/zhuimi run daily --pdf)"
+            echo "AI secrets detected; running scored daily pipeline"
           else
             echo "OPENAI_API_KEY is missing; falling back to raw fetch mode"
-            output="$(go run ./cmd/zhuimi run daily --skip-scoring --pdf)"
+            cmd=(go run ./cmd/zhuimi run daily --skip-scoring --pdf)
           fi
-          echo "$output"
+          log_file="$(mktemp)"
+          trap 'rm -f "$log_file"' EXIT
+          "${cmd[@]}" 2>&1 | tee "$log_file"
+          output="$(python3 -c 'import pathlib, sys; lines=[line.strip() for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]; print(lines[-1] if lines else "")' "$log_file")"
+          if [ -z "$output" ]; then
+            echo "missing JSON output from daily run"
+            exit 1
+          fi
+          echo "daily json: $output"
           export ZHUIMI_DAILY_OUTPUT="$output"
           report_date="$(python3 -c 'import json, os; print(json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"]).get("report_date", ""))')"
           report_written="$(python3 -c 'import json, os; print(str(bool(json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"]).get("report_written", False))).lower())')"

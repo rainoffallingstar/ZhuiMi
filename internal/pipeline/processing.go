@@ -276,6 +276,10 @@ func processArticles(ctx context.Context, cfg config.Config, db *store.Store, ta
 		return 0, nil
 	}
 
+	progress := newProcessorProgress(len(tasks))
+	progress.Start()
+	defer progress.Done()
+
 	names := make([]string, 0, len(tasks))
 	seen := make(map[string]struct{}, len(tasks))
 	for _, task := range tasks {
@@ -318,6 +322,7 @@ func processArticles(ctx context.Context, cfg config.Config, db *store.Store, ta
 					return processedCount, markErr
 				}
 			}
+			progress.Advance(task, err)
 			continue
 		}
 
@@ -334,6 +339,7 @@ func processArticles(ctx context.Context, cfg config.Config, db *store.Store, ta
 			}
 		}
 		processedCount++
+		progress.Advance(task, nil)
 	}
 	return processedCount, nil
 }
