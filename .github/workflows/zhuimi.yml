@@ -49,16 +49,27 @@ jobs:
           ZHUIMI_STATE_PATH: data/zhuimi/store.db
         run: |
           set -euo pipefail
-          output="$(go run ./cmd/zhuimi run daily --pdf)"
+          ai_enabled="false"
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            export ZHUIMI_PROCESSORS_ENABLED="generic_digest,aml_score"
+            ai_enabled="true"
+            output="$(go run ./cmd/zhuimi run daily --pdf)"
+          else
+            echo "OPENAI_API_KEY is missing; falling back to raw fetch mode"
+            output="$(go run ./cmd/zhuimi run daily --skip-scoring --pdf)"
+          fi
           echo "$output"
           export ZHUIMI_DAILY_OUTPUT="$output"
           report_date="$(python3 -c 'import json, os; print(json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"]).get("report_date", ""))')"
           report_written="$(python3 -c 'import json, os; print(str(bool(json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"]).get("report_written", False))).lower())')"
+          report_mode="$(python3 -c 'import json, os; print(json.loads(os.environ["ZHUIMI_DAILY_OUTPUT"]).get("mode", ""))')"
           pdf_path=""
           if [ "$report_written" = "true" ]; then
             pdf_path="content/ZhuiMi/${report_date}/index.pdf"
             test -f "$pdf_path"
           fi
+          echo "ai_enabled=$ai_enabled" >> "$GITHUB_OUTPUT"
+          echo "report_mode=$report_mode" >> "$GITHUB_OUTPUT"
           echo "report_date=$report_date" >> "$GITHUB_OUTPUT"
           echo "report_written=$report_written" >> "$GITHUB_OUTPUT"
           echo "pdf_path=$pdf_path" >> "$GITHUB_OUTPUT"
