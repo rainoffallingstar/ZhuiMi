@@ -40,6 +40,15 @@ jobs:
           ZHUIMI_STATE_PATH: data/zhuimi/store.db
         run: go run ./cmd/zhuimi feeds import
 
+      - name: Focus CI on PubMed feeds
+        env:
+          ZHUIMI_STATE_PATH: data/zhuimi/store.db
+        run: |
+          set -euo pipefail
+          go run ./cmd/zhuimi feeds set --all --status=inactive --yes
+          go run ./cmd/zhuimi feeds set --domain=pubmed.ncbi.nlm.nih.gov --status=active --yes
+          go run ./cmd/zhuimi feeds status --enabled=true --table
+
       - name: Run daily literature update
         id: daily
         timeout-minutes: 90
